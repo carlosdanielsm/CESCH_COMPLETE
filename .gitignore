@@ -42,4 +42,6 @@ next-env.d.ts
 
 credentials/
 *.json
+!package.json
+!tsconfig.json
 .env

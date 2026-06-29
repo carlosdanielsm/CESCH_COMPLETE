@@ -1,5 +1,34 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Búsqueda de nuevos enlaces
+
+La operación **Operaciones → Buscar enlaces** recibe un archivo `.xlsx`, `.xls` o
+`.csv` exportado desde Google Sheets. Requiere estas columnas:
+
+- `DESCRIPTION NUEVA ESPAÑOL`
+- `DESCRIPTION NUEVA INGLES`
+- `TOTAL UNIT`
+- `PRICE`
+- `LINKS ORIGINAL`
+
+Cada fila se investiga mediante OpenAI Responses API con búsqueda web restringida a
+Alibaba y Made-in-China. Se prioriza Alibaba, se aplica el tramo de precio
+correspondiente a `TOTAL UNIT`, se valida el MOQ y se puede exportar una nueva hoja
+con el enlace elegido, precio, diferencia, confianza y advertencias.
+
+Variables de entorno necesarias:
+
+```bash
+OPENAI_API_KEY=...
+# Opcional; el valor predeterminado es gpt-5.4-mini
+PRODUCT_SEARCH_MODEL=gpt-5.4-mini
+# Opcional; diferencia máxima recomendada antes de bajar la confianza
+PRODUCT_MAX_PRICE_DIFFERENCE_PERCENT=35
+```
+
+La suscripción ChatGPT Plus no incluye consumo de API. La cuenta de API asociada a
+la clave debe tener facturación y acceso al modelo/herramienta de búsqueda.
+
 ## Getting Started
 
 First, run the development server:

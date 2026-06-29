@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils";
 import {
   LayoutDashboard, FileText, Users, Tag, Scale,
   ClipboardList, Banknote, AlertTriangle, UserCog,
-  PanelLeftClose, PanelLeftOpen,
+  PanelLeftClose, PanelLeftOpen, Search,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -34,6 +34,7 @@ const navGroups = [
     label: "Operaciones",
     items: [
       { name: "Aranceles",     href: "/aranceles",     icon: Scale },
+      { name: "Buscar enlaces", href: "/busqueda-enlaces", icon: Search },
       { name: "Liquidaciones", href: "/liquidaciones", icon: ClipboardList },
       { name: "Tarifas",       href: "/tarifas",       icon: Banknote },
     ],

@@ -178,7 +178,7 @@ async function tryPlaywright(): Promise<string | null> {
     });
     const page = await browser.newPage();
 
-    page.on("request", (req) => {
+    page.on("request", (req: { headers(): Record<string, string> }) => {
       const auth = req.headers()["authorization"] ?? "";
       if (auth.toLowerCase().startsWith("bearer ") && auth.length > 20) {
         capturedToken = auth.slice(7);
