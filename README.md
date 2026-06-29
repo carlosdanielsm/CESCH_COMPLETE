@@ -20,8 +20,10 @@ Variables de entorno necesarias:
 
 ```bash
 OPENAI_API_KEY=...
-# Opcional; el valor predeterminado es gpt-5.4-mini
-PRODUCT_SEARCH_MODEL=gpt-5.4-mini
+# Opcional; el valor predeterminado es gpt-4.1-mini
+PRODUCT_SEARCH_MODEL=gpt-4.1-mini
+# Opcional; se usa si el modelo principal falla o no entrega JSON
+PRODUCT_SEARCH_FALLBACK_MODEL=gpt-5.4-mini
 # Opcional; diferencia máxima recomendada antes de bajar la confianza
 PRODUCT_MAX_PRICE_DIFFERENCE_PERCENT=35
 ```
