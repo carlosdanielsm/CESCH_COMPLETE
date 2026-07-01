@@ -14,6 +14,8 @@ export type ProductAlternative = {
   reason: string;
 };
 
+export type ProductSource = ProductAlternative["source"];
+
 export type ProductSearchResult = {
   found: boolean;
   newUrl: string;
@@ -84,31 +86,36 @@ export const PRODUCT_RESULT_SCHEMA = {
   ],
 } as const;
 
-export const PRODUCT_SEARCH_SYSTEM_PROMPT = `
+export function productSearchSystemPrompt(source: ProductSource) {
+  return `
 Eres un analista de compras internacionales. Debes buscar un enlace NUEVO y vigente
-para el mismo producto del enlace original.
+para el mismo producto del enlace original, exclusivamente en ${source}.
 
 Reglas obligatorias:
-1. Investiga primero en Alibaba. Usa Made-in-China solamente si no existe una opción
-   viable de Alibaba. No devuelvas Amazon, AliExpress ni otros portales.
+1. Haz varias consultas con combinaciones de modelo, material, dimensiones, capacidad,
+   potencia, aplicación y sinónimos en inglés. Investiga solamente en ${source}.
 2. Abre y analiza el enlace original cuando sea accesible. Si un CAPTCHA lo impide,
-   usa su título, fragmentos indexados y las descripciones suministradas.
+   usa su título, la información visible en la URL, fragmentos indexados y las
+   descripciones suministradas.
 3. El producto debe coincidir en tipo, material, modelo, dimensiones, capacidad,
    potencia, aplicación y demás especificaciones importantes. No basta con compartir
-   palabras genéricas.
+   palabras genéricas. La identidad del producto pesa más que el precio.
 4. Evalúa el precio unitario que realmente corresponde a TOTAL UNIT. En precios por
    tramos, elige el tramo que contiene esa cantidad. Rechaza ofertas cuyo MOQ sea
    mayor que TOTAL UNIT.
 5. Compara ese precio con PRICE. Prefiere la menor diferencia porcentual, pero nunca
    sacrifiques la identidad del producto por un precio parecido.
 6. Devuelve enlaces directos a fichas de producto, nunca páginas de búsqueda,
-   categorías, perfiles de proveedor ni URLs inventadas.
+   categorías, perfiles de proveedor ni URLs inventadas. No devuelvas el enlace
+   original como enlace nuevo.
 7. Si el precio, el MOQ o la identidad no pueden verificarse, indícalo en warnings y
    reduce confidence. Si no hay una opción suficientemente sustentada, found=false.
 8. priceDifferencePercent = abs(unitPrice - PRICE) / PRICE * 100. Usa null cuando no
    exista precio verificable.
-9. Responde únicamente con el JSON solicitado.
+9. Incluye hasta tres fichas directas adicionales del mismo portal en alternatives.
+10. Responde únicamente con el JSON solicitado.
 `.trim();
+}
 
 export function isAllowedProductUrl(
   value: string,
@@ -141,12 +148,33 @@ export function sameProductUrl(first: string, second: string) {
   try {
     const left = new URL(first);
     const right = new URL(second);
-    const normalizeHost = (host: string) =>
-      host.toLowerCase().replace(/^www\./, "");
+    const provider = (host: string) => {
+      const normalized = host.toLowerCase();
+      if (normalized === "alibaba.com" || normalized.endsWith(".alibaba.com")) {
+        return "Alibaba";
+      }
+      if (
+        normalized === "made-in-china.com" ||
+        normalized.endsWith(".made-in-china.com")
+      ) {
+        return "Made-in-China";
+      }
+      return "Other";
+    };
     const normalizePath = (path: string) =>
       decodeURIComponent(path).replace(/\/+$/, "").toLowerCase();
+
+    const leftProvider = provider(left.hostname);
+    const rightProvider = provider(right.hostname);
+    if (leftProvider === "Other" || leftProvider !== rightProvider) return false;
+
+    const alibabaId = (url: URL) =>
+      normalizePath(url.pathname).match(/_(\d{8,})\.html?$/i)?.[1] ?? null;
+    const leftId = alibabaId(left);
+    const rightId = alibabaId(right);
+    if (leftId && rightId) return leftId === rightId;
+
     return (
-      normalizeHost(left.hostname) === normalizeHost(right.hostname) &&
       normalizePath(left.pathname) === normalizePath(right.pathname)
     );
   } catch {
@@ -193,4 +221,115 @@ export function getResponseText(response: unknown) {
     }
   }
   return "";
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function candidateScore(result: ProductSearchResult) {
+  if (!result.found) return Number.NEGATIVE_INFINITY;
+  const priceDifference = result.priceDifferencePercent;
+  const priceScore =
+    priceDifference === null ? 0 : Math.max(0, 100 - priceDifference * 2);
+  const verifiedPriceBonus = result.unitPrice === null ? 0 : 8;
+  const verifiedMoqBonus = result.minOrder === null ? 0 : 4;
+  const sourceBonus = result.source === "Alibaba" ? 4 : 0;
+  return (
+    result.confidence * 0.65 +
+    priceScore * 0.35 +
+    verifiedPriceBonus +
+    verifiedMoqBonus +
+    sourceBonus
+  );
+}
+
+/**
+ * Combina investigaciones independientes. Alibaba gana cuando su resultado es
+ * comparable; Made-in-China puede ganar cuando su evidencia es materialmente mejor.
+ */
+export function selectBestProductResult(
+  results: ProductSearchResult[],
+): ProductSearchResult {
+  const candidates = results
+    .filter((result) => result.found)
+    .sort((left, right) => candidateScore(right) - candidateScore(left));
+  const best = candidates[0];
+  const alibaba = candidates.find((result) => result.source === "Alibaba");
+  const selected =
+    best &&
+    alibaba &&
+    candidateScore(alibaba) >= candidateScore(best) - 8 &&
+    alibaba.confidence >= 55
+      ? alibaba
+      : best;
+
+  const allEvidence = uniqueStrings(
+    results.flatMap((result) => result.evidenceUrls),
+  );
+
+  if (!selected) {
+    const mostInformative = [...results].sort(
+      (left, right) => right.confidence - left.confidence,
+    )[0];
+    return {
+      found: false,
+      newUrl: "",
+      source: "None",
+      productTitle: mostInformative?.productTitle ?? "",
+      unitPrice: null,
+      currency: "USD",
+      minOrder: null,
+      quantityRange: "",
+      priceDifferencePercent: null,
+      confidence: 0,
+      matchSummary:
+        mostInformative?.matchSummary ||
+        "Ninguno de los dos portales produjo una coincidencia verificable.",
+      warnings: uniqueStrings(
+        results.flatMap((result) => result.warnings),
+      ).slice(0, 8),
+      alternatives: results
+        .flatMap((result) => result.alternatives)
+        .filter(
+          (item, index, items) =>
+            items.findIndex((candidate) =>
+              sameProductUrl(candidate.url, item.url),
+            ) === index,
+        )
+        .slice(0, 3),
+      evidenceUrls: allEvidence,
+    };
+  }
+
+  const alternatives = [
+    ...candidates
+      .filter((candidate) => candidate !== selected)
+      .map((candidate) => ({
+        url: candidate.newUrl,
+        source: candidate.source as ProductSource,
+        unitPrice: candidate.unitPrice,
+        minOrder: candidate.minOrder,
+        reason: `Candidato válido de ${candidate.source} con ${candidate.confidence}% de confianza.`,
+      })),
+    ...results.flatMap((result) => result.alternatives),
+  ]
+    .filter(
+      (item) =>
+        !sameProductUrl(item.url, selected.newUrl) &&
+        isAllowedProductUrl(item.url, item.source),
+    )
+    .filter(
+      (item, index, items) =>
+        items.findIndex((candidate) =>
+          sameProductUrl(candidate.url, item.url),
+        ) === index,
+    )
+    .slice(0, 3);
+
+  return {
+    ...selected,
+    alternatives,
+    evidenceUrls: allEvidence,
+  };
 }

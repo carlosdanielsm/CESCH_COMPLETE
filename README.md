@@ -11,10 +11,16 @@ La operación **Operaciones → Buscar enlaces** recibe un archivo `.xlsx`, `.xl
 - `PRICE`
 - `LINKS ORIGINAL`
 
-Cada fila se investiga mediante OpenAI Responses API con búsqueda web restringida a
-Alibaba y Made-in-China. Se prioriza Alibaba, se aplica el tramo de precio
-correspondiente a `TOTAL UNIT`, se valida el MOQ y se puede exportar una nueva hoja
-con el enlace elegido, precio, diferencia, confianza y advertencias.
+Cada fila dispara dos investigaciones independientes y simultáneas mediante OpenAI
+Responses API: una restringida a Alibaba y otra a Made-in-China. Los candidatos se
+comparan por identidad del producto, MOQ, tramo de precio correspondiente a
+`TOTAL UNIT` y diferencia frente a `PRICE`. Alibaba gana cuando las opciones son
+comparables; Made-in-China puede ganar si la evidencia es materialmente mejor.
+
+La carga masiva procesa dos filas a la vez (cuatro búsquedas web simultáneas como
+máximo). Esto reduce el tiempo total sin producir una ráfaga excesiva de peticiones.
+Cada fila puede consumir dos llamadas de Responses API, más reintentos si un modelo
+falla.
 
 Variables de entorno necesarias:
 

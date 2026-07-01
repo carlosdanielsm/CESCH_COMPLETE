@@ -53,6 +53,7 @@ const REQUIRED_COLUMNS = [
   "PRICE",
   "LINKS ORIGINAL",
 ];
+const BATCH_CONCURRENCY = 2;
 
 function normalizeHeader(value: string) {
   return value
@@ -275,18 +276,34 @@ export default function BusquedaEnlacesPage() {
     if (!pending.length) return;
     stopRef.current = false;
     setIsRunning(true);
-    for (const row of pending) {
-      if (stopRef.current) break;
-      if (
-        !row.originalUrl ||
-        !Number.isFinite(row.totalUnits) ||
-        !Number.isFinite(row.expectedPrice)
-      ) {
-        continue;
+    let nextIndex = 0;
+
+    async function worker() {
+      while (!stopRef.current) {
+        const row = pending[nextIndex];
+        nextIndex += 1;
+        if (!row) return;
+        if (
+          !row.originalUrl ||
+          !Number.isFinite(row.totalUnits) ||
+          !Number.isFinite(row.expectedPrice)
+        ) {
+          continue;
+        }
+        await searchRow(row);
       }
-      await searchRow(row);
     }
-    setIsRunning(false);
+
+    try {
+      await Promise.all(
+        Array.from(
+          { length: Math.min(BATCH_CONCURRENCY, pending.length) },
+          () => worker(),
+        ),
+      );
+    } finally {
+      setIsRunning(false);
+    }
   }
 
   function stop() {
@@ -329,7 +346,8 @@ export default function BusquedaEnlacesPage() {
           <h1 className="text-2xl font-semibold">Búsqueda de nuevos enlaces</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Compara el producto, el precio por tramo y el MOQ para la cantidad
-            solicitada. Alibaba tiene prioridad; Made-in-China funciona como respaldo.
+            solicitada. Alibaba y Made-in-China se investigan en paralelo; Alibaba
+            tiene prioridad cuando ambas opciones son comparables.
           </p>
         </div>
 
@@ -407,7 +425,7 @@ export default function BusquedaEnlacesPage() {
                 </Button>
               ) : (
                 <Button variant="destructive" onClick={stop}>
-                  Detener después de esta fila
+                  Detener después de las búsquedas activas
                 </Button>
               )}
               <Button

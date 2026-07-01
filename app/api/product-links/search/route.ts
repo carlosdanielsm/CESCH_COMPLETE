@@ -2,13 +2,15 @@ import { NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabaseServer";
 import {
   PRODUCT_RESULT_SCHEMA,
-  PRODUCT_SEARCH_SYSTEM_PROMPT,
   collectEvidenceUrls,
   getResponseText,
   isAllowedProductUrl,
+  productSearchSystemPrompt,
   sameProductUrl,
+  selectBestProductResult,
   type ProductSearchInput,
   type ProductSearchResult,
+  type ProductSource,
 } from "@/lib/product-link-search";
 
 export const runtime = "nodejs";
@@ -24,12 +26,14 @@ type SearchAttempt =
   | {
       ok: true;
       model: string;
+      source: ProductSource;
       payload: OpenAiPayload;
       result: ProductSearchResult;
     }
   | {
       ok: false;
       model: string;
+      source: ProductSource;
       payload: OpenAiPayload;
       status: number;
       reason: string;
@@ -75,13 +79,16 @@ function cleanInput(value: unknown): ProductSearchInput | null {
 function normalizeResult(
   raw: ProductSearchResult,
   input: ProductSearchInput,
+  expectedSource: ProductSource,
   evidenceUrls: string[],
 ): ProductSearchResult {
   const warnings = Array.isArray(raw.warnings)
     ? raw.warnings.map(String).slice(0, 8)
     : [];
   const directUrlIsValid =
-    raw.found && isAllowedProductUrl(raw.newUrl, raw.source);
+    raw.found &&
+    isAllowedProductUrl(raw.newUrl, expectedSource) &&
+    !sameProductUrl(raw.newUrl, input.originalUrl);
   const hasEvidence =
     directUrlIsValid &&
     evidenceUrls.some((evidenceUrl) => sameProductUrl(evidenceUrl, raw.newUrl));
@@ -92,7 +99,9 @@ function normalizeResult(
   const moqIsValid = minOrder === null || minOrder <= input.totalUnits;
 
   if (!directUrlIsValid) {
-    warnings.unshift("No se pudo validar un enlace directo de producto.");
+    warnings.unshift(
+      "No se pudo validar un enlace nuevo y directo de producto.",
+    );
   }
   if (directUrlIsValid && !hasEvidence) {
     warnings.unshift(
@@ -140,7 +149,7 @@ function normalizeResult(
     found: Boolean(directUrlIsValid && hasEvidence && moqIsValid),
     newUrl: directUrlIsValid && hasEvidence && moqIsValid ? raw.newUrl : "",
     source:
-      directUrlIsValid && hasEvidence && moqIsValid ? raw.source : "None",
+      directUrlIsValid && hasEvidence && moqIsValid ? expectedSource : "None",
     productTitle: String(raw.productTitle ?? ""),
     unitPrice,
     currency: String(raw.currency || "USD"),
@@ -157,7 +166,12 @@ function normalizeResult(
     warnings,
     alternatives: Array.isArray(raw.alternatives)
       ? raw.alternatives
-          .filter((item) => isAllowedProductUrl(item.url, item.source))
+          .filter(
+            (item) =>
+              item.source === expectedSource &&
+              isAllowedProductUrl(item.url, expectedSource) &&
+              !sameProductUrl(item.url, input.originalUrl),
+          )
           .slice(0, 3)
       : [],
     evidenceUrls,
@@ -191,8 +205,14 @@ function incompleteReason(payload: OpenAiPayload) {
   return `OpenAI terminó con estado "${status}": ${reason}.`;
 }
 
-function requestBody(input: ProductSearchInput, model: string) {
+function requestBody(
+  input: ProductSearchInput,
+  model: string,
+  source: ProductSource,
+) {
   const supportsReasoning = /^(gpt-5|o\d)/i.test(model);
+  const allowedDomain =
+    source === "Alibaba" ? "alibaba.com" : "made-in-china.com";
 
   return {
     model,
@@ -202,14 +222,14 @@ function requestBody(input: ProductSearchInput, model: string) {
         type: "web_search",
         search_context_size: "medium",
         filters: {
-          allowed_domains: ["alibaba.com", "made-in-china.com"],
+          allowed_domains: [allowedDomain],
         },
       },
     ],
     tool_choice: "required",
     include: ["web_search_call.action.sources"],
     input: [
-      { role: "system", content: PRODUCT_SEARCH_SYSTEM_PROMPT },
+      { role: "system", content: productSearchSystemPrompt(source) },
       {
         role: "user",
         content: JSON.stringify(
@@ -240,6 +260,7 @@ function requestBody(input: ProductSearchInput, model: string) {
 async function runSearchAttempt(
   input: ProductSearchInput,
   model: string,
+  source: ProductSource,
 ): Promise<SearchAttempt> {
   let response: Response;
   try {
@@ -249,29 +270,40 @@ async function runSearchAttempt(
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(requestBody(input, model)),
+      body: JSON.stringify(requestBody(input, model, source)),
       signal: AbortSignal.timeout(55_000),
     });
   } catch (error) {
-    if (
+    const isTimeout =
       error instanceof Error &&
-      (error.name === "TimeoutError" || error.name === "AbortError")
+      (error.name === "TimeoutError" || error.name === "AbortError");
+    const reason = isTimeout
+      ? `${source}: el modelo ${model} tardó más de 55 segundos.`
+      : `${source}: no se pudo conectar con OpenAI (${
+          error instanceof Error ? error.message : "error de red"
+        }).`;
+
+    if (
+      !isTimeout
     ) {
-      const reason = `El modelo ${model} tardó más de 55 segundos.`;
+      console.error("[product-links/search] OpenAI network error", error);
+    } else {
       console.error("[product-links/search] OpenAI attempt timeout", {
         model,
+        source,
         reason,
       });
-      return {
-        ok: false,
-        model,
-        payload: {},
-        status: 504,
-        reason,
-        retryable: true,
-      };
     }
-    throw error;
+
+    return {
+      ok: false,
+      model,
+      source,
+      payload: {},
+      status: isTimeout ? 504 : 502,
+      reason,
+      retryable: true,
+    };
   }
 
   const rawBody = await response.text();
@@ -286,6 +318,7 @@ async function runSearchAttempt(
     const reason = providerErrorMessage(payload);
     console.error("[product-links/search] OpenAI request failed", {
       model,
+      source,
       status: response.status,
       requestId: response.headers.get("x-request-id"),
       reason,
@@ -293,6 +326,7 @@ async function runSearchAttempt(
     return {
       ok: false,
       model,
+      source,
       payload,
       status: response.status,
       reason,
@@ -308,6 +342,7 @@ async function runSearchAttempt(
     const reason = incompleteReason(payload);
     console.error("[product-links/search] OpenAI returned no output text", {
       model,
+      source,
       requestId: response.headers.get("x-request-id"),
       status: payload.status,
       incompleteDetails: payload.incomplete_details,
@@ -322,6 +357,7 @@ async function runSearchAttempt(
     return {
       ok: false,
       model,
+      source,
       payload,
       status: 502,
       reason,
@@ -333,23 +369,60 @@ async function runSearchAttempt(
     return {
       ok: true,
       model,
+      source,
       payload,
       result: JSON.parse(text) as ProductSearchResult,
     };
   } catch {
     console.error("[product-links/search] Invalid structured output", {
       model,
+      source,
       outputPreview: text.slice(0, 500),
     });
     return {
       ok: false,
       model,
+      source,
       payload,
       status: 502,
       reason: "OpenAI devolvió un JSON que no pudo interpretarse.",
       retryable: true,
     };
   }
+}
+
+async function searchPortal(
+  input: ProductSearchInput,
+  source: ProductSource,
+  primaryModel: string,
+  fallbackModel: string,
+) {
+  let attempt = await runSearchAttempt(input, primaryModel, source);
+  if (
+    !attempt.ok &&
+    attempt.retryable &&
+    fallbackModel !== primaryModel
+  ) {
+    console.warn("[product-links/search] Retrying portal with fallback model", {
+      source,
+      primaryModel,
+      fallbackModel,
+      reason: attempt.reason,
+    });
+    attempt = await runSearchAttempt(input, fallbackModel, source);
+  }
+
+  if (!attempt.ok) return { attempt };
+
+  return {
+    attempt,
+    result: normalizeResult(
+      attempt.result,
+      input,
+      source,
+      collectEvidenceUrls(attempt.payload),
+    ),
+  };
 }
 
 export async function POST(request: Request) {
@@ -383,45 +456,62 @@ export async function POST(request: Request) {
 
     const primaryModel =
       process.env.PRODUCT_SEARCH_MODEL?.trim() || DEFAULT_MODEL;
-    let attempt = await runSearchAttempt(input, primaryModel);
-
     const configuredFallback =
       process.env.PRODUCT_SEARCH_FALLBACK_MODEL?.trim() ||
       (primaryModel === DEFAULT_MODEL ? SECONDARY_MODEL : DEFAULT_MODEL);
-    if (
-      !attempt.ok &&
-      attempt.retryable &&
-      configuredFallback !== primaryModel
-    ) {
-      console.warn("[product-links/search] Retrying with fallback model", {
-        primaryModel,
-        fallbackModel: configuredFallback,
-        reason: attempt.reason,
-      });
-      attempt = await runSearchAttempt(input, configuredFallback);
-    }
 
-    if (!attempt.ok) {
+    const portalSearches = await Promise.all(
+      (["Alibaba", "Made-in-China"] as const).map((source) =>
+        searchPortal(input, source, primaryModel, configuredFallback),
+      ),
+    );
+    const successfulResults = portalSearches.flatMap((search) =>
+      search.result ? [search.result] : [],
+    );
+
+    if (!successfulResults.length) {
+      const attempts = portalSearches.map((search) => search.attempt);
+      const firstAttempt = attempts[0];
+      const isRateLimited = attempts.some(
+        (attempt) => !attempt.ok && attempt.status === 429,
+      );
+      const isUnauthorized = attempts.some(
+        (attempt) => !attempt.ok && attempt.status === 401,
+      );
+      const reasons = attempts
+        .filter((attempt) => !attempt.ok)
+        .map((attempt) => attempt.reason)
+        .join(" | ");
       const publicStatus =
-        attempt.status === 401 || attempt.status === 429
-          ? attempt.status
+        isUnauthorized
+          ? 401
+          : isRateLimited
+            ? 429
           : 502;
       return NextResponse.json(
         {
-          error: `No se pudo completar la búsqueda con ${attempt.model}: ${attempt.reason}`,
-          model: attempt.model,
+          error: `No se pudo completar la búsqueda paralela: ${reasons}`,
+          model: firstAttempt.model,
         },
         { status: publicStatus },
       );
     }
 
-    return NextResponse.json(
-      normalizeResult(
-        attempt.result,
-        input,
-        collectEvidenceUrls(attempt.payload),
-      ),
+    const failedPortalWarnings = portalSearches.flatMap((search) =>
+      search.attempt.ok
+        ? []
+        : [`${search.attempt.source} no respondió: ${search.attempt.reason}`],
     );
+    if (failedPortalWarnings.length) {
+      successfulResults.forEach((result) => {
+        result.warnings = [...failedPortalWarnings, ...result.warnings].slice(
+          0,
+          8,
+        );
+      });
+    }
+
+    return NextResponse.json(selectBestProductResult(successfulResults));
   } catch (error) {
     if (
       error instanceof Error &&

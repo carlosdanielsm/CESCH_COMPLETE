@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:product-links": "node --experimental-strip-types --test scripts/test-product-link-search.mjs"
   },
   "dependencies": {
     "@google-cloud/vision": "^5.3.4",
